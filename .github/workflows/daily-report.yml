@@ -1,0 +1,30 @@
+name: Daily football report
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 07:00 Europe/Warsaw in winter; change to 06:00 UTC in summer if needed.
+    - cron: "0 6 * * *"
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run daily report
+        env:
+          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          LEAGUE_IDS: ${{ vars.LEAGUE_IDS || '106' }}
+          TIMEZONE: Europe/Warsaw
+          LOOKAHEAD_DAYS: "1"
+          HISTORY_MATCHES: "10"
+          H2H_MATCHES: "5"
+          MIN_SAMPLE: "3"
+          CORNERS_THRESHOLD: "10"
+          GOALS_THRESHOLD: "2.5"
+          MAX_MATCHES: "5"
+        run: python3 app.py
