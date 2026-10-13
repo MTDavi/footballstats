@@ -16,7 +16,7 @@ Model używa głównie aktualnych statystyk home/away. H2H ma wagę pomocniczą 
 
 ## Uruchomienie lokalne
 
-1. Utwórz konto i klucz API-Football.
+1. Utwórz konto Sportmonks i token API. Darmowy plan obejmuje Danish Superliga (`league_id=271`).
 2. Utwórz bota przez `@BotFather`, rozpocznij z nim rozmowę i ustal `chat_id`.
 3. Skopiuj `.env.example` do własnych zmiennych środowiskowych.
 4. Uruchom:
@@ -33,14 +33,14 @@ Do codziennej wysyłki bez włączonego komputera:
 
 1. Wypchnij repozytorium na GitHub.
 2. W ustawieniach repozytorium dodaj sekrety:
-   - `API_FOOTBALL_KEY`
+   - `SPORTMONKS_TOKEN`
    - `TELEGRAM_BOT_TOKEN`
    - `TELEGRAM_CHAT_ID`
-3. Opcjonalnie dodaj zmienną repozytorium `LEAGUE_IDS`, np. `106,39`.
+3. Opcjonalnie dodaj zmienną repozytorium `LEAGUE_IDS`. Dla darmowego planu zostaw `271`.
 4. Uruchom workflow ręcznie przez `Actions`, aby wykonać pierwszy test.
 
 Workflow jest ustawiony na codziennie o 07:00 czasu polskiego zimą. Godziny w harmonogramie GitHub są oparte na UTC.
 
 ## Ograniczenia darmowego API
 
-API-Football Free ma limit 100 zapytań dziennie. Dlatego raport powinien obejmować ograniczoną liczbę lig, a dane historyczne są pobierane tylko dla nadchodzących meczów.
+Darmowy plan Sportmonks obejmuje Danish Superliga i Scottish Premiership. Ta wersja używa wyłącznie Danish Superliga (`271`) i pobiera bieżący sezon, historię, rzuty rożne, gole oraz H2H.

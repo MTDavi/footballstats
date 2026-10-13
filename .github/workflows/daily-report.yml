@@ -15,10 +15,10 @@ jobs:
 
       - name: Run daily report
         env:
-          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+          SPORTMONKS_TOKEN: ${{ secrets.SPORTMONKS_TOKEN }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          LEAGUE_IDS: ${{ vars.LEAGUE_IDS || '106' }}
+          LEAGUE_IDS: ${{ vars.LEAGUE_IDS || '271' }}
           TIMEZONE: Europe/Warsaw
           LOOKAHEAD_DAYS: "1"
           HISTORY_MATCHES: "10"
