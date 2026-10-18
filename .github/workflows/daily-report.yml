@@ -3,8 +3,10 @@ name: Daily football report
 on:
   workflow_dispatch:
   schedule:
-    # 07:00 Europe/Warsaw in winter; change to 06:00 UTC in summer if needed.
-    - cron: "0 6 * * *"
+    # GitHub cron uses UTC. These two times cover 06:00 Europe/Warsaw
+    # in summer and winter; app.py skips the inactive one.
+    - cron: "0 4 * * *"
+    - cron: "0 5 * * *"
 
 jobs:
   report:
@@ -15,12 +17,13 @@ jobs:
 
       - name: Run daily report
         env:
-          SPORTMONKS_TOKEN: ${{ secrets.SPORTMONKS_TOKEN }}
+          FIVEDOLLARFOOTBALL_API_KEY: ${{ secrets.FIVEDOLLARFOOTBALL_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          LEAGUE_IDS: ${{ vars.LEAGUE_IDS || '271' }}
+          LEAGUE_IDS: "4160026622,4212821298,3405541143,686337048,3614399544"
           TIMEZONE: Europe/Warsaw
-          LOOKAHEAD_DAYS: "1"
+          RUN_AT_LOCAL_HOUR: "6"
+          LOOKAHEAD_DAYS: "0"
           HISTORY_MATCHES: "10"
           H2H_MATCHES: "5"
           MIN_SAMPLE: "3"

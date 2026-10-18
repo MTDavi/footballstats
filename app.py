@@ -1,8 +1,8 @@
-"""Daily Danish Superliga corners and goals report for Telegram.
+"""Daily football corners and goals report for Telegram.
 
-The script uses Sportmonks Football API. It compares home-team, away-team
-and head-to-head averages, then sends only matches above the configured
-corners and goals thresholds.
+The script uses 5DollarFootballAPI. The free plan covers the top five
+European leagues and returns goals, corners and cards on fixture rows.
+Head-to-head values are calculated locally from each team's recent fixtures.
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ import json
 import os
 import sys
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from statistics import mean
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -20,10 +20,17 @@ from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
 
-BASE_URL = "https://api.sportmonks.com/v3/football"
-FINISHED_STATE_IDS = {5, 7, 8}  # FT, AET, FT_PEN
-UPCOMING_STATE_IDS = {1}  # NS
-CORNERS_TYPE_ID = 34
+BASE_URL = "https://api.5dollarfootballapi.com/v1"
+DEFAULT_LEAGUE_IDS = [
+    4160026622,  # Premier League
+    4212821298,  # La Liga
+    3405541143,  # Serie A
+    686337048,   # Bundesliga
+    3614399544,  # Ligue 1
+]
+FINISHED_STATUSES = {"finished", "ft", "full", "aet", "pens"}
+UPCOMING_STATUSES = {"scheduled", "not_started", "upcoming"}
+SOURCE_FOOTER = "Źródło danych: https://5dollarfootballapi.com"
 
 
 def env_int(name: str, default: int) -> int:
@@ -48,9 +55,9 @@ def number(value: Any) -> float | None:
         return None
 
 
-class Sportmonks:
-    def __init__(self, token: str) -> None:
-        self.token = token
+class FiveDollarFootballApi:
+    def __init__(self, api_key: str) -> None:
+        self.api_key = api_key
 
     def get(self, path: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         params = params or {}
@@ -61,7 +68,7 @@ class Sportmonks:
         request = Request(
             url,
             headers={
-                "Authorization": self.token,
+                "Authorization": f"Bearer {self.api_key}",
                 "Accept": "application/json",
             },
         )
@@ -74,61 +81,59 @@ class Sportmonks:
                 detail = json.loads(body)
             except json.JSONDecodeError:
                 detail = body[:500]
-            raise RuntimeError(f"Sportmonks request failed ({exc.code}): {detail}") from exc
+            raise RuntimeError(f"5DollarFootballAPI request failed ({exc.code}): {detail}") from exc
         except (URLError, TimeoutError) as exc:
-            raise RuntimeError(f"Sportmonks request failed: {exc}") from exc
+            raise RuntimeError(f"5DollarFootballAPI request failed: {exc}") from exc
 
-        errors = payload.get("errors") or {}
+        if payload.get("success") in {0, False}:
+            raise RuntimeError(f"5DollarFootballAPI error: {payload}")
+        errors = payload.get("errors") or payload.get("error")
         if errors:
-            raise RuntimeError(f"Sportmonks error: {errors}")
+            raise RuntimeError(f"5DollarFootballAPI error: {errors}")
         data = payload.get("data", [])
         if isinstance(data, dict):
             return [data]
         return data
 
-    def upcoming(self, start: date, end: date) -> list[dict[str, Any]]:
+    def fixtures_for_day(self, day: date, timezone_name: str) -> list[dict[str, Any]]:
+        local_zone = ZoneInfo(timezone_name)
+        start_local = datetime.combine(day, time.min, tzinfo=local_zone)
+        end_local = start_local + timedelta(days=1)
+        start_utc = int(start_local.astimezone(timezone.utc).timestamp())
+        end_utc = int(end_local.astimezone(timezone.utc).timestamp())
         return self.get(
-            f"/fixtures/between/{start.isoformat()}/{end.isoformat()}",
-            {"include": "participants;state", "per_page": 50, "order": "asc"},
+            "/fixtures",
+            {
+                "start_time": start_utc,
+                "end_time": end_utc,
+                "status": "scheduled",
+                "per_page": 100,
+                "order": "asc",
+                "lang": "pl",
+            },
         )
 
-    def team_history(self, team_id: int, today: date, league_id: int) -> list[dict[str, Any]]:
-        """Fetch up to the requested recent fixtures in 100-day API windows."""
-        oldest = today - timedelta(days=370)
-        window_end = today - timedelta(days=1)
-        fixtures: list[dict[str, Any]] = []
-        while window_end >= oldest:
-            window_start = max(oldest, window_end - timedelta(days=99))
-            fixtures.extend(
-                self.get(
-                    f"/fixtures/between/{window_start.isoformat()}/{window_end.isoformat()}/{team_id}",
-                    {
-                        "include": "statistics;scores;participants;state",
-                        "filters": f"fixtureStatisticTypes:{CORNERS_TYPE_ID}",
-                        "per_page": 50,
-                        "order": "desc",
-                    },
-                )
-            )
-            window_end = window_start - timedelta(days=1)
-        return [
-            fixture
-            for fixture in fixtures
-            if int(fixture.get("league_id", 0)) == league_id and fixture_is_finished(fixture)
-        ]
-
-    def head_to_head(
-        self, home_id: int, away_id: int, league_id: int, last: int
+    def team_history(
+        self,
+        team_id: int,
+        oldest: date,
+        newest: date,
     ) -> list[dict[str, Any]]:
+        start_utc = int(datetime.combine(oldest, time.min, tzinfo=timezone.utc).timestamp())
+        end_utc = int(
+            datetime.combine(newest + timedelta(days=1), time.min, tzinfo=timezone.utc).timestamp()
+        )
         return self.get(
-            f"/fixtures/head-to-head/{home_id}/{away_id}",
+            f"/teams/{team_id}/fixtures",
             {
-                "include": "statistics;scores;participants;state",
-                "filters": f"fixtureLeagues:{league_id}",
-                "per_page": last,
+                "start_time": start_utc,
+                "end_time": end_utc,
+                "status": "finished",
+                "per_page": 50,
                 "order": "desc",
+                "lang": "pl",
             },
-        )[:last]
+        )
 
 
 @dataclass
@@ -140,127 +145,75 @@ class Summary:
     goals_against: float
 
 
-def fixture_participants(fixture: dict[str, Any]) -> list[dict[str, Any]]:
-    participants = fixture.get("participants") or []
-    return [item for item in participants if isinstance(item, dict)]
-
-
 def fixture_team_ids(fixture: dict[str, Any]) -> tuple[int, int]:
-    participants = fixture_participants(fixture)
-    home: int | None = None
-    away: int | None = None
-    for participant in participants:
-        participant_id = participant.get("id")
-        if participant_id is None:
-            continue
-        location = (participant.get("meta") or {}).get("location")
-        if location == "home":
-            home = int(participant_id)
-        elif location == "away":
-            away = int(participant_id)
-    if home is None or away is None:
-        if len(participants) >= 2:
-            home = int(participants[0]["id"])
-            away = int(participants[1]["id"])
-        else:
-            raise KeyError("Fixture has no two participants")
-    return home, away
+    teams = fixture.get("teams") or {}
+    return int(teams["home"]["id"]), int(teams["away"]["id"])
 
 
 def fixture_team_names(fixture: dict[str, Any]) -> tuple[str, str]:
-    participants = fixture_participants(fixture)
-    names: dict[str, str] = {}
-    for participant in participants:
-        location = (participant.get("meta") or {}).get("location")
-        if location in {"home", "away"}:
-            names[location] = str(participant.get("name", "Unknown"))
-    if "home" not in names or "away" not in names:
-        if len(participants) >= 2:
-            return str(participants[0].get("name", "Unknown")), str(participants[1].get("name", "Unknown"))
-        raise KeyError("Fixture has no team names")
-    return names["home"], names["away"]
+    teams = fixture.get("teams") or {}
+    return str(teams["home"].get("name", "Unknown")), str(teams["away"].get("name", "Unknown"))
+
+
+def fixture_league_id(fixture: dict[str, Any]) -> int:
+    league = fixture.get("league") or {}
+    return int(league.get("id", fixture.get("league_id", 0)))
+
+
+def fixture_league_name(fixture: dict[str, Any]) -> str:
+    return str((fixture.get("league") or {}).get("name", "Football"))
+
+
+def fixture_status(fixture: dict[str, Any]) -> str:
+    return str(fixture.get("status", "")).casefold()
 
 
 def fixture_is_finished(fixture: dict[str, Any]) -> bool:
-    return int(fixture.get("state_id", 0)) in FINISHED_STATE_IDS
+    return fixture_status(fixture) in FINISHED_STATUSES
 
 
 def fixture_is_upcoming(fixture: dict[str, Any]) -> bool:
-    return int(fixture.get("state_id", 0)) in UPCOMING_STATE_IDS
+    return fixture_status(fixture) in UPCOMING_STATUSES
+
+
+def fixture_kickoff(fixture: dict[str, Any]) -> datetime:
+    raw = str(fixture.get("kickoff_utc", ""))
+    parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 def team_fixture_stats(
     fixture: dict[str, Any], team_id: int
 ) -> tuple[float, float] | None:
-    """Return (corners_for, corners_against), or None when unavailable."""
     home_id, away_id = fixture_team_ids(fixture)
-    by_team: dict[int, float] = {}
-    by_location: dict[str, float] = {}
-    for item in fixture.get("statistics", []) or []:
-        if int(item.get("type_id", 0)) != CORNERS_TYPE_ID:
-            continue
-        data = item.get("data") or {}
-        value = number(data.get("value") if isinstance(data, dict) else data)
-        if value is None:
-            continue
-        participant_id = item.get("participant_id")
-        if participant_id is not None:
-            by_team[int(participant_id)] = value
-        location = item.get("location")
-        if location in {"home", "away"}:
-            by_location[location] = value
-
-    own = by_team.get(team_id)
-    opponent_id = away_id if team_id == home_id else home_id
-    opponent = by_team.get(opponent_id)
-    if own is None or opponent is None:
-        own_location = "home" if team_id == home_id else "away"
-        opponent_location = "away" if own_location == "home" else "home"
-        own = by_location.get(own_location)
-        opponent = by_location.get(opponent_location)
-    if own is None or opponent is None:
+    corners = fixture.get("corners") or {}
+    home = number(corners.get("home"))
+    away = number(corners.get("away"))
+    if home is None or away is None:
         return None
-    return own, opponent
+    if team_id == home_id:
+        return home, away
+    if team_id == away_id:
+        return away, home
+    return None
 
 
 def fixture_goals(
     fixture: dict[str, Any], team_id: int
 ) -> tuple[float, float] | None:
-    """Return (goals_for, goals_against) from the final/current score."""
     home_id, away_id = fixture_team_ids(fixture)
-    scores = fixture.get("scores", []) or []
-    preferred = [item for item in scores if item.get("description") == "CURRENT"]
-    if not preferred:
-        preferred = [
-            item
-            for item in scores
-            if item.get("description") in {"2ND_HALF", "AET", "FT_PEN"}
-        ]
-    by_team: dict[int, float] = {}
-    by_location: dict[str, float] = {}
-    for item in preferred:
-        score = item.get("score") or {}
-        goals = number(score.get("goals"))
-        if goals is None:
-            continue
-        participant_id = item.get("participant_id")
-        if participant_id is not None:
-            by_team[int(participant_id)] = goals
-        location = score.get("participant")
-        if location in {"home", "away"}:
-            by_location[location] = goals
-
-    own = by_team.get(team_id)
-    opponent_id = away_id if team_id == home_id else home_id
-    opponent = by_team.get(opponent_id)
-    if own is None or opponent is None:
-        own_location = "home" if team_id == home_id else "away"
-        opponent_location = "away" if own_location == "home" else "home"
-        own = by_location.get(own_location)
-        opponent = by_location.get(opponent_location)
-    if own is None or opponent is None:
+    goals = fixture.get("goals") or {}
+    home = number(goals.get("home"))
+    away = number(goals.get("away"))
+    if home is None or away is None:
         return None
-    return own, opponent
+    if team_id == home_id:
+        return home, away
+    if team_id == away_id:
+        return away, home
+    return None
 
 
 def summarize(
@@ -293,7 +246,6 @@ def summarize(
         if corner_pair is None or goal_pair is None:
             continue
         rows.append((*corner_pair, *goal_pair))
-
     if not rows:
         return None
     return Summary(
@@ -330,13 +282,10 @@ def fmt(value: float | None) -> str:
 
 
 def local_kickoff(raw: str, timezone_name: str) -> str:
-    try:
-        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        return parsed.astimezone(ZoneInfo(timezone_name)).strftime("%Y-%m-%d %H:%M")
-    except (ValueError, TypeError):
-        return raw.replace("T", " ")[:16]
+    parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(ZoneInfo(timezone_name)).strftime("%Y-%m-%d %H:%M")
 
 
 def report_for_match(
@@ -349,15 +298,15 @@ def report_for_match(
     timezone_name: str,
 ) -> str:
     home_name, away_name = fixture_team_names(fixture)
-    kickoff = local_kickoff(str(fixture.get("starting_at", "")), timezone_name)
+    kickoff = local_kickoff(str(fixture["kickoff_utc"]), timezone_name)
     h2h_corners = None
     h2h_goals = None
     if h2h_summary:
         h2h_corners = h2h_summary.corners_for + h2h_summary.corners_against
         h2h_goals = h2h_summary.goals_for + h2h_summary.goals_against
-
     lines = [
         f"🔥 {home_name} – {away_name}",
+        f"🏆 {fixture_league_name(fixture)}",
         f"🗓 {kickoff} ({timezone_name})",
         "",
         "                         Gospodarze  Goście      H2H",
@@ -388,20 +337,23 @@ def send_telegram(token: str, chat_id: str, message: str) -> None:
         raise RuntimeError(f"Telegram error: {result}")
 
 
+def parse_league_ids() -> list[int]:
+    raw = os.getenv("LEAGUE_IDS")
+    if not raw:
+        return DEFAULT_LEAGUE_IDS
+    return [int(value.strip()) for value in raw.split(",") if value.strip()]
+
+
 def run() -> None:
-    sportmonks_token = os.getenv("SPORTMONKS_TOKEN")
+    api_key = os.getenv("FIVEDOLLARFOOTBALL_API_KEY")
     telegram_token = os.getenv("TELEGRAM_BOT_TOKEN")
     telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID")
-    if not sportmonks_token or not telegram_token or not telegram_chat_id:
+    if not api_key or not telegram_token or not telegram_chat_id:
         raise RuntimeError(
-            "Set SPORTMONKS_TOKEN, TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID before running."
+            "Set FIVEDOLLARFOOTBALL_API_KEY, TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID before running."
         )
 
-    league_ids = [
-        int(value.strip())
-        for value in os.getenv("LEAGUE_IDS", "271").split(",")
-        if value.strip()
-    ]
+    league_ids = parse_league_ids()
     lookahead_days = env_int("LOOKAHEAD_DAYS", 1)
     history_matches = env_int("HISTORY_MATCHES", 10)
     h2h_matches = env_int("H2H_MATCHES", 5)
@@ -410,48 +362,74 @@ def run() -> None:
     goals_threshold = env_float("GOALS_THRESHOLD", 2.5)
     timezone_name = os.getenv("TIMEZONE", "Europe/Warsaw")
     timezone_info = ZoneInfo(timezone_name)
-    today = datetime.now(timezone_info).date()
+    now_local = datetime.now(timezone_info)
+    if os.getenv("GITHUB_EVENT_NAME") == "schedule":
+        run_at_local_hour = env_int("RUN_AT_LOCAL_HOUR", 6)
+        if now_local.hour != run_at_local_hour:
+            print(
+                f"Skipping alternate UTC schedule; local time is {now_local:%H:%M}, "
+                f"configured report time is {run_at_local_hour:02d}:00 {timezone_name}."
+            )
+            return
+    today = now_local.date()
 
-    api = Sportmonks(sportmonks_token)
+    api = FiveDollarFootballApi(api_key)
     upcoming: dict[int, dict[str, Any]] = {}
     for offset in range(lookahead_days + 1):
         day = today + timedelta(days=offset)
-        for fixture in api.upcoming(day, day):
+        for fixture in api.fixtures_for_day(day, timezone_name):
             try:
-                league_id = int(fixture.get("league_id", 0))
                 fixture_id = int(fixture["id"])
+                league_id = fixture_league_id(fixture)
             except (KeyError, TypeError, ValueError):
                 continue
             if league_id in league_ids and fixture_is_upcoming(fixture):
                 upcoming[fixture_id] = fixture
 
     if not upcoming:
-        send_telegram(telegram_token, telegram_chat_id, "⚽ Brak zaplanowanych meczów Danish Superliga w wybranym okresie.")
+        message = "📊 NAJCIEKAWSZE MECZE DNIA\n\nBrak zaplanowanych meczów w wybranym okresie."
+        send_telegram(telegram_token, telegram_chat_id, f"{message}\n\n{SOURCE_FOOTER}")
         return
 
-    history_by_team: dict[int, list[dict[str, Any]]] = {}
+    history_by_team: dict[tuple[int, int], list[dict[str, Any]]] = {}
     h2h_by_fixture: dict[int, list[dict[str, Any]]] = {}
+    oldest = today - timedelta(days=90)
+    newest = today - timedelta(days=1)
     for fixture_id, fixture in upcoming.items():
         home_id, away_id = fixture_team_ids(fixture)
+        league_id = fixture_league_id(fixture)
         for team_id in (home_id, away_id):
-            if team_id not in history_by_team:
-                history_by_team[team_id] = api.team_history(
-                    team_id, today, int(fixture.get("league_id", league_ids[0]))
-                )[:history_matches]
-        league_id = int(fixture.get("league_id", league_ids[0]))
-        h2h_by_fixture[fixture_id] = api.head_to_head(home_id, away_id, league_id, h2h_matches)
+            cache_key = (team_id, league_id)
+            if cache_key not in history_by_team:
+                history_by_team[cache_key] = [
+                    item
+                    for item in api.team_history(team_id, oldest, newest)
+                    if fixture_league_id(item) == league_id and fixture_is_finished(item)
+                ]
+
+        home_history = history_by_team[(home_id, league_id)]
+        h2h = []
+        for item in home_history:
+            try:
+                item_home, item_away = fixture_team_ids(item)
+            except (KeyError, TypeError, ValueError):
+                continue
+            if away_id in {item_home, item_away}:
+                h2h.append(item)
+            if len(h2h) >= h2h_matches:
+                break
+        h2h_by_fixture[fixture_id] = h2h
 
     selected: list[tuple[float, str]] = []
     failures = 0
     for fixture_id, fixture in upcoming.items():
         home_id, away_id = fixture_team_ids(fixture)
+        league_id = fixture_league_id(fixture)
         try:
-            home_summary = summarize(
-                history_by_team[home_id], home_id, venue="home", minimum_sample=min_sample
-            )
-            away_summary = summarize(
-                history_by_team[away_id], away_id, venue="away", minimum_sample=min_sample
-            )
+            history = history_by_team[(home_id, league_id)][:history_matches]
+            away_history = history_by_team[(away_id, league_id)][:history_matches]
+            home_summary = summarize(history, home_id, venue="home", minimum_sample=min_sample)
+            away_summary = summarize(away_history, away_id, venue="away", minimum_sample=min_sample)
             h2h_summary = summarize(h2h_by_fixture[fixture_id], home_id, minimum_sample=min_sample)
             if not home_summary or not away_summary:
                 continue
@@ -480,17 +458,18 @@ def run() -> None:
     selected.sort(key=lambda item: item[0], reverse=True)
     max_matches = env_int("MAX_MATCHES", 5)
     if selected:
-        message = "\n\n".join(report for _, report in selected[:max_matches])
-        message = "📊 NAJCIEKAWSZE MECZE DANISH SUPERLIGA\n\n" + message
+        message = "📊 NAJCIEKAWSZE MECZE DNIA\n\n" + "\n\n".join(
+            report for _, report in selected[:max_matches]
+        )
     else:
         message = (
-            "📊 NAJCIEKAWSZE MECZE DANISH SUPERLIGA\n\n"
+            "📊 NAJCIEKAWSZE MECZE DNIA\n\n"
             f"Brak meczów spełniających warunki: rożne > {corners_threshold:g} "
             f"i gole > {goals_threshold:g}."
         )
     if failures:
         print(f"Skipped fixtures due to incomplete data: {failures}", file=sys.stderr)
-    send_telegram(telegram_token, telegram_chat_id, message[:4090])
+    send_telegram(telegram_token, telegram_chat_id, f"{message}\n\n{SOURCE_FOOTER}"[:4090])
 
 
 if __name__ == "__main__":
