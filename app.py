@@ -1,8 +1,9 @@
 """Daily football corners and goals report for Telegram.
 
-The script uses 5DollarFootballAPI. The free plan covers the top five
-European leagues and returns goals, corners and cards on fixture rows.
-Head-to-head values are calculated locally from each team's recent fixtures.
+The script combines two sources: 5DollarFootballAPI for the top five
+European leagues and Sportmonks for its free Danish and Scottish coverage.
+Both sources are normalized to the same internal fixture shape before the
+statistics and Telegram report are calculated.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from zoneinfo import ZoneInfo
 
 
 BASE_URL = "https://api.5dollarfootballapi.com/v1"
+SPORTMONKS_BASE_URL = "https://api.sportmonks.com/v3/football"
 DEFAULT_LEAGUE_IDS = [
     4160026622,  # Premier League
     4212821298,  # La Liga
@@ -31,7 +33,12 @@ DEFAULT_LEAGUE_IDS = [
 ]
 FINISHED_STATUSES = {"finished", "ft", "full", "aet", "pens"}
 UPCOMING_STATUSES = {"scheduled", "not_started", "upcoming"}
-SOURCE_FOOTER = "Źródło danych: https://5dollarfootballapi.com"
+SPORTMONKS_FINISHED_STATE_IDS = {5, 7, 8}
+SPORTMONKS_UPCOMING_STATE_IDS = {1}
+SPORTMONKS_CORNERS_TYPE_ID = 34
+SOURCE_FOOTER = (
+    "Źródła danych: https://5dollarfootballapi.com oraz https://www.sportmonks.com"
+)
 
 
 def env_int(name: str, default: int) -> int:
@@ -152,6 +159,186 @@ class FiveDollarFootballApi:
                 "lang": "pl",
             },
         )
+
+
+class SportmonksApi:
+    """Sportmonks adapter for the free Danish and Scottish leagues."""
+
+    def __init__(self, token: str) -> None:
+        self.token = token
+
+    def get(self, path: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        params = params or {}
+        query = urlencode({key: value for key, value in params.items() if value is not None})
+        url = f"{SPORTMONKS_BASE_URL}{path}"
+        if query:
+            url = f"{url}?{query}"
+        request = Request(
+            url,
+            headers={"Authorization": self.token, "Accept": "application/json"},
+        )
+        try:
+            with urlopen(request, timeout=30) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            try:
+                detail = json.loads(body)
+            except json.JSONDecodeError:
+                detail = body[:500]
+            raise RuntimeError(f"Sportmonks request failed ({exc.code}): {detail}") from exc
+        except (URLError, TimeoutError) as exc:
+            raise RuntimeError(f"Sportmonks request failed: {exc}") from exc
+
+        errors = payload.get("errors") or {}
+        if errors:
+            raise RuntimeError(f"Sportmonks error: {errors}")
+        data = payload.get("data", [])
+        if isinstance(data, dict):
+            return [data]
+        return data
+
+    def fixtures_for_day(
+        self, day: date, timezone_name: str, status: str = "scheduled"
+    ) -> list[dict[str, Any]]:
+        del timezone_name, status
+        rows = self.get(
+            f"/fixtures/between/{day.isoformat()}/{day.isoformat()}",
+            {
+                "include": "participants;state",
+                "per_page": 50,
+                "order": "asc",
+            },
+        )
+        league_names = {271: "Danish Superliga", 501: "Scottish Premiership"}
+        return [
+            normalize_sportmonks_fixture(row, league_id, league_names[league_id])
+            for row in rows
+            if (league_id := int(row.get("league_id", 0))) in league_names
+        ]
+
+    def team_history(
+        self, team_id: int, oldest: date, newest: date, league_id: int
+    ) -> list[dict[str, Any]]:
+        fixtures: list[dict[str, Any]] = []
+        window_end = newest
+        while window_end >= oldest:
+            window_start = max(oldest, window_end - timedelta(days=99))
+            rows = self.get(
+                f"/fixtures/between/{window_start.isoformat()}/{window_end.isoformat()}/{team_id}",
+                {
+                    "include": "statistics;scores;participants;state",
+                    "filters": f"fixtureStatisticTypes:{SPORTMONKS_CORNERS_TYPE_ID}",
+                    "per_page": 50,
+                    "order": "desc",
+                },
+            )
+            fixtures.extend(
+                normalize_sportmonks_fixture(row, league_id, "Football")
+                for row in rows
+                if int(row.get("league_id", 0)) == league_id
+            )
+            window_end = window_start - timedelta(days=1)
+        return fixtures
+
+    def head_to_head(
+        self, home_id: int, away_id: int, league_id: int, last: int
+    ) -> list[dict[str, Any]]:
+        rows = self.get(
+            f"/fixtures/head-to-head/{home_id}/{away_id}",
+            {
+                "include": "statistics;scores;participants;state",
+                "filters": f"fixtureLeagues:{league_id}",
+                "per_page": last,
+                "order": "desc",
+            },
+        )
+        league_name = "Danish Superliga" if league_id == 271 else "Scottish Premiership"
+        return [
+            normalize_sportmonks_fixture(row, league_id, league_name)
+            for row in rows[:last]
+        ]
+
+
+def normalize_sportmonks_fixture(
+    fixture: dict[str, Any], league_id: int, league_name: str
+) -> dict[str, Any]:
+    participants = [
+        item for item in (fixture.get("participants") or []) if isinstance(item, dict)
+    ]
+    by_location: dict[str, dict[str, Any]] = {}
+    for participant in participants:
+        location = (participant.get("meta") or {}).get("location")
+        if location in {"home", "away"}:
+            by_location[location] = participant
+    if "home" not in by_location or "away" not in by_location:
+        if len(participants) < 2:
+            raise KeyError("Sportmonks fixture has no two participants")
+        by_location = {"home": participants[0], "away": participants[1]}
+
+    home_id = int(by_location["home"]["id"])
+    away_id = int(by_location["away"]["id"])
+    goals_by_location: dict[str, float] = {}
+    scores = fixture.get("scores") or []
+    preferred = [item for item in scores if item.get("description") == "CURRENT"]
+    if not preferred:
+        preferred = [
+            item
+            for item in scores
+            if item.get("description") in {"2ND_HALF", "AET", "FT_PEN"}
+        ]
+    for item in preferred:
+        score = item.get("score") or {}
+        location = score.get("participant")
+        goals = number(score.get("goals"))
+        if location in {"home", "away"} and goals is not None:
+            goals_by_location[location] = goals
+
+    corners_by_location: dict[str, float] = {}
+    corners_by_team: dict[int, float] = {}
+    for item in fixture.get("statistics", []) or []:
+        if int(item.get("type_id", 0)) != SPORTMONKS_CORNERS_TYPE_ID:
+            continue
+        data = item.get("data") or {}
+        value = number(data.get("value") if isinstance(data, dict) else data)
+        if value is None:
+            continue
+        participant_id = item.get("participant_id")
+        if participant_id is not None:
+            corners_by_team[int(participant_id)] = value
+        location = item.get("location")
+        if location in {"home", "away"}:
+            corners_by_location[location] = value
+    for location, team_id in (("home", home_id), ("away", away_id)):
+        if location not in corners_by_location and team_id in corners_by_team:
+            corners_by_location[location] = corners_by_team[team_id]
+
+    state_id = int(fixture.get("state_id", 0))
+    if state_id in SPORTMONKS_FINISHED_STATE_IDS:
+        status = "finished"
+    elif state_id in SPORTMONKS_UPCOMING_STATE_IDS:
+        status = "scheduled"
+    else:
+        status = "unknown"
+
+    return {
+        "id": fixture["id"],
+        "league": {"id": league_id, "name": league_name},
+        "teams": {
+            "home": {"id": home_id, "name": str(by_location["home"].get("name", "Unknown"))},
+            "away": {"id": away_id, "name": str(by_location["away"].get("name", "Unknown"))},
+        },
+        "kickoff_utc": str(fixture.get("starting_at", "")),
+        "status": status,
+        "goals": {
+            "home": goals_by_location.get("home"),
+            "away": goals_by_location.get("away"),
+        },
+        "corners": {
+            "home": corners_by_location.get("home"),
+            "away": corners_by_location.get("away"),
+        },
+    }
 
 
 @dataclass
@@ -364,6 +551,7 @@ def parse_league_ids() -> list[int]:
 
 def run() -> None:
     api_key = os.getenv("FIVEDOLLARFOOTBALL_API_KEY")
+    sportmonks_token = os.getenv("SPORTMONKS_TOKEN")
     telegram_token = os.getenv("TELEGRAM_BOT_TOKEN")
     telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID")
     if not api_key or not telegram_token or not telegram_chat_id:
@@ -393,61 +581,94 @@ def run() -> None:
     today = now_local.date()
 
     api = FiveDollarFootballApi(api_key)
+    providers: dict[str, Any] = {"fivedollar": api}
+    provider_leagues: dict[str, set[int]] = {
+        "fivedollar": set(league_ids),
+    }
+    if sportmonks_token:
+        providers["sportmonks"] = SportmonksApi(sportmonks_token)
+        provider_leagues["sportmonks"] = {
+            int(value.strip())
+            for value in os.getenv("SPORTMONKS_LEAGUE_IDS", "271,501").split(",")
+            if value.strip()
+        }
+    else:
+        print(
+            "SPORTMONKS_TOKEN not set; skipping Danish and Scottish fixtures.",
+            file=sys.stderr,
+        )
+
     upcoming: dict[int, dict[str, Any]] = {}
-    for offset in range(lookahead_days + 1):
-        day = today + timedelta(days=offset)
-        status = "all" if test_today else "scheduled"
-        for fixture in api.fixtures_for_day(day, timezone_name, status=status):
-            try:
-                fixture_id = int(fixture["id"])
-                league_id = fixture_league_id(fixture)
-            except (KeyError, TypeError, ValueError):
-                continue
-            if league_id in league_ids and (test_today or fixture_is_upcoming(fixture)):
-                upcoming[fixture_id] = fixture
+    for source_name, provider in providers.items():
+        for offset in range(lookahead_days + 1):
+            day = today + timedelta(days=offset)
+            status = "all" if test_today else "scheduled"
+            for fixture in provider.fixtures_for_day(day, timezone_name, status=status):
+                try:
+                    fixture_id = int(fixture["id"])
+                    league_id = fixture_league_id(fixture)
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if league_id in provider_leagues[source_name] and (
+                    test_today or fixture_is_upcoming(fixture)
+                ):
+                    fixture["_provider"] = source_name
+                    upcoming[fixture_id] = fixture
 
     if not upcoming:
         message = "📊 NAJCIEKAWSZE MECZE DNIA\n\nBrak zaplanowanych meczów w wybranym okresie."
         send_telegram(telegram_token, telegram_chat_id, f"{message}\n\n{SOURCE_FOOTER}")
         return
 
-    history_by_team: dict[tuple[int, int], list[dict[str, Any]]] = {}
+    history_by_team: dict[tuple[str, int, int], list[dict[str, Any]]] = {}
     h2h_by_fixture: dict[int, list[dict[str, Any]]] = {}
     oldest = today - timedelta(days=90)
     newest = today - timedelta(days=1)
     for fixture_id, fixture in upcoming.items():
+        source_name = str(fixture.get("_provider", "fivedollar"))
+        provider = providers[source_name]
         home_id, away_id = fixture_team_ids(fixture)
         league_id = fixture_league_id(fixture)
         for team_id in (home_id, away_id):
-            cache_key = (team_id, league_id)
+            cache_key = (source_name, team_id, league_id)
             if cache_key not in history_by_team:
+                if source_name == "sportmonks":
+                    history = provider.team_history(team_id, today - timedelta(days=370), newest, league_id)
+                else:
+                    history = provider.team_history(team_id, oldest, newest)
                 history_by_team[cache_key] = [
                     item
-                    for item in api.team_history(team_id, oldest, newest)
+                    for item in history
                     if fixture_league_id(item) == league_id and fixture_is_finished(item)
                 ]
 
-        home_history = history_by_team[(home_id, league_id)]
-        h2h = []
-        for item in home_history:
-            try:
-                item_home, item_away = fixture_team_ids(item)
-            except (KeyError, TypeError, ValueError):
-                continue
-            if away_id in {item_home, item_away}:
-                h2h.append(item)
-            if len(h2h) >= h2h_matches:
-                break
-        h2h_by_fixture[fixture_id] = h2h
+        home_history = history_by_team[(source_name, home_id, league_id)]
+        if source_name == "sportmonks":
+            h2h_by_fixture[fixture_id] = provider.head_to_head(
+                home_id, away_id, league_id, h2h_matches
+            )
+        else:
+            h2h = []
+            for item in home_history:
+                try:
+                    item_home, item_away = fixture_team_ids(item)
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if away_id in {item_home, item_away}:
+                    h2h.append(item)
+                if len(h2h) >= h2h_matches:
+                    break
+            h2h_by_fixture[fixture_id] = h2h
 
     selected: list[tuple[float, str]] = []
     failures = 0
     for fixture_id, fixture in upcoming.items():
+        source_name = str(fixture.get("_provider", "fivedollar"))
         home_id, away_id = fixture_team_ids(fixture)
         league_id = fixture_league_id(fixture)
         try:
-            history = history_by_team[(home_id, league_id)][:history_matches]
-            away_history = history_by_team[(away_id, league_id)][:history_matches]
+            history = history_by_team[(source_name, home_id, league_id)][:history_matches]
+            away_history = history_by_team[(source_name, away_id, league_id)][:history_matches]
             home_summary = summarize(history, home_id, venue="home", minimum_sample=min_sample)
             away_summary = summarize(away_history, away_id, venue="away", minimum_sample=min_sample)
             h2h_summary = summarize(h2h_by_fixture[fixture_id], home_id, minimum_sample=min_sample)

@@ -24,9 +24,11 @@ jobs:
       - name: Run daily report
         env:
           FIVEDOLLARFOOTBALL_API_KEY: ${{ secrets.FIVEDOLLARFOOTBALL_API_KEY }}
+          SPORTMONKS_TOKEN: ${{ secrets.SPORTMONKS_TOKEN }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           LEAGUE_IDS: "4160026622,4212821298,3405541143,686337048,3614399544"
+          SPORTMONKS_LEAGUE_IDS: "271,501"
           TIMEZONE: Europe/Warsaw
           RUN_AT_LOCAL_HOUR: "6"
           TEST_TODAY: ${{ inputs.test_today || false }}
