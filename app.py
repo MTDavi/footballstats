@@ -600,10 +600,14 @@ def run() -> None:
 
     upcoming: dict[int, dict[str, Any]] = {}
     for source_name, provider in providers.items():
+        source_received = 0
+        source_kept = 0
         for offset in range(lookahead_days + 1):
             day = today + timedelta(days=offset)
             status = "all" if test_today else "scheduled"
-            for fixture in provider.fixtures_for_day(day, timezone_name, status=status):
+            fixtures = provider.fixtures_for_day(day, timezone_name, status=status)
+            source_received += len(fixtures)
+            for fixture in fixtures:
                 try:
                     fixture_id = int(fixture["id"])
                     league_id = fixture_league_id(fixture)
@@ -614,6 +618,11 @@ def run() -> None:
                 ):
                     fixture["_provider"] = source_name
                     upcoming[fixture_id] = fixture
+                    source_kept += 1
+        print(
+            f"{source_name}: received {source_received} fixtures, "
+            f"kept {source_kept} after league/status filters."
+        )
 
     if not upcoming:
         message = "📊 NAJCIEKAWSZE MECZE DNIA\n\nBrak zaplanowanych meczów w wybranym okresie."
