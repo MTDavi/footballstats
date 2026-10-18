@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from time import sleep
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from statistics import mean
@@ -72,18 +73,33 @@ class FiveDollarFootballApi:
                 "Accept": "application/json",
             },
         )
-        try:
-            with urlopen(request, timeout=30) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-        except HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")
+        for attempt in range(6):
             try:
-                detail = json.loads(body)
-            except json.JSONDecodeError:
-                detail = body[:500]
-            raise RuntimeError(f"5DollarFootballAPI request failed ({exc.code}): {detail}") from exc
-        except (URLError, TimeoutError) as exc:
-            raise RuntimeError(f"5DollarFootballAPI request failed: {exc}") from exc
+                with urlopen(request, timeout=30) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                break
+            except HTTPError as exc:
+                body = exc.read().decode("utf-8", errors="replace")
+                try:
+                    detail = json.loads(body)
+                except json.JSONDecodeError:
+                    detail = body[:500]
+                if exc.code == 429 and attempt < 5:
+                    retry_after = number(exc.headers.get("Retry-After"))
+                    wait_seconds = max(1, int(retry_after or 60))
+                    print(
+                        f"5DollarFootballAPI rate limit reached; retrying in {wait_seconds}s.",
+                        file=sys.stderr,
+                    )
+                    sleep(wait_seconds)
+                    continue
+                raise RuntimeError(
+                    f"5DollarFootballAPI request failed ({exc.code}): {detail}"
+                ) from exc
+            except (URLError, TimeoutError) as exc:
+                raise RuntimeError(f"5DollarFootballAPI request failed: {exc}") from exc
+        else:
+            raise RuntimeError("5DollarFootballAPI request failed after retries")
 
         if payload.get("success") in {0, False}:
             raise RuntimeError(f"5DollarFootballAPI error: {payload}")
