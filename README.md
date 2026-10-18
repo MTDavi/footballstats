@@ -37,6 +37,8 @@ Do codziennej wysyłki bez włączonego komputera:
 3. Pozostaw `LEAGUE_IDS` z pięcioma domyślnymi identyfikatorami lig z `.env.example`.
 4. Uruchom workflow ręcznie przez `Actions`, aby wykonać pierwszy test.
 
+Przy ręcznym uruchomieniu można zaznaczyć `test_today`, aby sprawdzić Telegram także po rozpoczęciu meczów. Ten tryb obejmuje wszystkie mecze z dzisiejszej daty; automatyczny raport nadal wybiera wyłącznie spotkania jeszcze nierozpoczęte.
+
 Workflow wysyła raport codziennie o 06:00 czasu polskiego. GitHub Actions używa UTC, dlatego workflow uwzględnia czas letni i zimowy, a skrypt pomija dodatkowe wyzwolenie kontrolne.
 
 ## Ograniczenia darmowego API

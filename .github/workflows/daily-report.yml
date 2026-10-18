@@ -2,6 +2,12 @@ name: Daily football report
 
 on:
   workflow_dispatch:
+    inputs:
+      test_today:
+        description: "Test: include today's already started/finished matches"
+        required: false
+        default: false
+        type: boolean
   schedule:
     # GitHub cron uses UTC. These two times cover 06:00 Europe/Warsaw
     # in summer and winter; app.py skips the inactive one.
@@ -23,6 +29,7 @@ jobs:
           LEAGUE_IDS: "4160026622,4212821298,3405541143,686337048,3614399544"
           TIMEZONE: Europe/Warsaw
           RUN_AT_LOCAL_HOUR: "6"
+          TEST_TODAY: ${{ inputs.test_today || false }}
           LOOKAHEAD_DAYS: "0"
           HISTORY_MATCHES: "10"
           H2H_MATCHES: "5"

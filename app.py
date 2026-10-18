@@ -95,7 +95,9 @@ class FiveDollarFootballApi:
             return [data]
         return data
 
-    def fixtures_for_day(self, day: date, timezone_name: str) -> list[dict[str, Any]]:
+    def fixtures_for_day(
+        self, day: date, timezone_name: str, status: str = "scheduled"
+    ) -> list[dict[str, Any]]:
         local_zone = ZoneInfo(timezone_name)
         start_local = datetime.combine(day, time.min, tzinfo=local_zone)
         end_local = start_local + timedelta(days=1)
@@ -106,7 +108,7 @@ class FiveDollarFootballApi:
             {
                 "start_time": start_utc,
                 "end_time": end_utc,
-                "status": "scheduled",
+                "status": status,
                 "per_page": 100,
                 "order": "asc",
                 "lang": "pl",
@@ -362,6 +364,7 @@ def run() -> None:
     goals_threshold = env_float("GOALS_THRESHOLD", 2.5)
     timezone_name = os.getenv("TIMEZONE", "Europe/Warsaw")
     timezone_info = ZoneInfo(timezone_name)
+    test_today = os.getenv("TEST_TODAY", "false").casefold() == "true"
     now_local = datetime.now(timezone_info)
     if os.getenv("GITHUB_EVENT_NAME") == "schedule":
         run_at_local_hour = env_int("RUN_AT_LOCAL_HOUR", 6)
@@ -377,13 +380,14 @@ def run() -> None:
     upcoming: dict[int, dict[str, Any]] = {}
     for offset in range(lookahead_days + 1):
         day = today + timedelta(days=offset)
-        for fixture in api.fixtures_for_day(day, timezone_name):
+        status = "all" if test_today else "scheduled"
+        for fixture in api.fixtures_for_day(day, timezone_name, status=status):
             try:
                 fixture_id = int(fixture["id"])
                 league_id = fixture_league_id(fixture)
             except (KeyError, TypeError, ValueError):
                 continue
-            if league_id in league_ids and fixture_is_upcoming(fixture):
+            if league_id in league_ids and (test_today or fixture_is_upcoming(fixture)):
                 upcoming[fixture_id] = fixture
 
     if not upcoming:
