@@ -31,6 +31,7 @@ jobs:
           SPORTMONKS_LEAGUE_IDS: "271,501"
           TIMEZONE: Europe/Warsaw
           RUN_AT_LOCAL_HOUR: "6"
+          GITHUB_SCHEDULE: ${{ github.event.schedule }}
           TEST_TODAY: ${{ inputs.test_today || false }}
           LOOKAHEAD_DAYS: "0"
           HISTORY_MATCHES: "10"

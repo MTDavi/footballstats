@@ -572,9 +572,30 @@ def run() -> None:
     now_local = datetime.now(timezone_info)
     if os.getenv("GITHUB_EVENT_NAME") == "schedule":
         run_at_local_hour = env_int("RUN_AT_LOCAL_HOUR", 6)
-        if now_local.hour != run_at_local_hour:
+        schedule_cron = os.getenv("GITHUB_SCHEDULE", "").strip()
+        schedule_parts = schedule_cron.split()
+        if (
+            len(schedule_parts) == 5
+            and schedule_parts[0] == "0"
+            and schedule_parts[1].isdigit()
+        ):
+            # GitHub schedules are UTC and can start late. Select the cron
+            # entry that corresponds to the configured local report hour
+            # instead of comparing the actual (possibly delayed) start time.
+            scheduled_utc = datetime.combine(
+                now_local.date(),
+                time(hour=int(schedule_parts[1]), tzinfo=timezone.utc),
+            )
+            scheduled_local = scheduled_utc.astimezone(timezone_info)
+            is_active_schedule = scheduled_local.hour == run_at_local_hour
+        else:
+            # Keep a safe fallback for local runs where the schedule metadata
+            # is unavailable.
+            is_active_schedule = now_local.hour == run_at_local_hour
+
+        if not is_active_schedule:
             print(
-                f"Skipping alternate UTC schedule; local time is {now_local:%H:%M}, "
+                f"Skipping alternate UTC schedule ({schedule_cron or 'unknown'}); "
                 f"configured report time is {run_at_local_hour:02d}:00 {timezone_name}."
             )
             return
